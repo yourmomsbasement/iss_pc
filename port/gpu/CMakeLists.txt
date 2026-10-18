@@ -424,6 +424,13 @@ add_executable(async-fetch-snapshot-test EXCLUDE_FROM_ALL ../tests/test_async_fe
 target_compile_options(async-fetch-snapshot-test PRIVATE -UNDEBUG)
 target_include_directories(async-fetch-snapshot-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(async-fetch-snapshot-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
+add_executable(variant-reuse-fetch-test EXCLUDE_FROM_ALL ../tests/test_variant_reuse_fetch.cpp
+    shadps4/shader_recompiler/frontend/fetch_shader.cpp
+    shadps4/shader_recompiler/frontend/decode.cpp
+    shadps4/shader_recompiler/frontend/format.cpp)
+target_compile_options(variant-reuse-fetch-test PRIVATE -UNDEBUG)
+target_include_directories(variant-reuse-fetch-test PRIVATE shim shadps4 third_party/gcn/include)
+target_link_libraries(variant-reuse-fetch-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
 target_compile_options(depth-stencil-state-test PRIVATE -UNDEBUG)
 target_include_directories(depth-stencil-state-test PRIVATE shim shadps4 third_party/gcn/include)
 target_link_libraries(depth-stencil-state-test PRIVATE Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum)
