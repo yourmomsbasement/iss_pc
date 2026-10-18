@@ -76,12 +76,17 @@ struct PageManager::Impl {
     // tlg: TLG_FAULT_PROFILE=1 prints, every 5 s, the guest instructions whose faults on GPU
     // tracked pages cost the most time (which game code waits on the GPU, and for what).
     struct FaultSite { u64 count = 0, ns = 0; VAddr last = 0; u64 caller = 0; bool write = false; };
-    static void ProfileFault(void* context, VAddr addr, bool write, u64 ns) {
+    static bool FaultProfileEnabled() {
 #ifdef __linux__
         static const bool enabled = [] { const char* e = std::getenv("TLG_FAULT_PROFILE"); return e && *e == '1'; }();
-        if (!enabled) {
-            return;
-        }
+        return enabled;
+#else
+        return false;
+#endif
+    }
+
+    static void ProfileFault(void* context, VAddr addr, bool write, u64 ns) {
+#ifdef __linux__
         static std::mutex mutex;
         static std::unordered_map<u64, FaultSite> sites;
         static auto window = std::chrono::steady_clock::now();
@@ -122,8 +127,12 @@ struct PageManager::Impl {
     }
 
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
-        const auto start = std::chrono::steady_clock::now();
         const auto addr = reinterpret_cast<VAddr>(fault_address);
+        // Every tracked-page fault comes here: no clock reads unless the profile is on.
+        if (!FaultProfileEnabled()) {
+            return HandleGuestFault(context, addr);
+        }
+        const auto start = std::chrono::steady_clock::now();
         const bool handled = HandleGuestFault(context, addr);
         ProfileFault(context, addr, Common::IsWriteError(context),
                      static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(

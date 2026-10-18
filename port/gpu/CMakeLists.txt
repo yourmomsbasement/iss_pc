@@ -492,6 +492,10 @@ add_executable(bit-array-test EXCLUDE_FROM_ALL ../tests/test_bit_array.cpp)
 target_include_directories(bit-array-test PRIVATE ../tests/stubs shim shadps4)
 target_compile_options(bit-array-test PRIVATE -UNDEBUG -Wall -Wextra -Werror -mavx2)
 
+add_executable(lru-cache-test EXCLUDE_FROM_ALL ../tests/test_lru_cache.cpp)
+target_include_directories(lru-cache-test PRIVATE ../tests/stubs shim shadps4)
+target_compile_options(lru-cache-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+
 add_executable(page-state-test EXCLUDE_FROM_ALL ../tests/test_page_state.cpp)
 target_include_directories(page-state-test PRIVATE ../tests/stubs shim shadps4)
 target_link_libraries(page-state-test PRIVATE Boost::headers)
