@@ -116,6 +116,14 @@ static void cancellation(void) {
     assert(pthread_join(second,NULL)==0 && (uint32_t)b.result==0x8002000d);
     assert((uint32_t)poll_sem(id,1)==0x80020003);
 }
+/* IDs past the first table size still resolve; a deleted one in the middle does not. */
+static void many(void) {
+    uint32_t ids[600];
+    for (int i=0;i<600;++i) assert(create(&ids[i],"many",1,1,1,NULL)==0);
+    assert(delete_sem(ids[300])==0);
+    for (int i=0;i<600;++i) assert(i==300 ? (uint32_t)poll_sem(ids[i],1)==0x80020003 : poll_sem(ids[i],1)==0);
+    for (int i=0;i<600;++i) if (i!=300) assert(delete_sem(ids[i])==0);
+}
 int main(int argc,char **argv) {
     setup();
     if (argc>1 && !strcmp(argv[1],"--priority")) {
@@ -129,7 +137,7 @@ int main(int argc,char **argv) {
     }
     if (argc>1 && !strcmp(argv[1],"--concurrency")) concurrency();
     else if (argc>1 && !strcmp(argv[1],"--cancel-delete")) cancellation();
-    else lifecycle();
+    else { lifecycle(); many(); }
     puts("PASS: semaphore contracts");
     return 0;
 }

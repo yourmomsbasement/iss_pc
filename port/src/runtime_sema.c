@@ -22,16 +22,14 @@ typedef struct Sema {
     int deleted;
     char name[32];
     Waiter *first;
-    struct Sema *next;
 } Sema;
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-static Sema *registry;
+/* Live semaphores indexed by ID (IDs are handed out in order and never reused). */
+static Sema **by_id;
+static size_t by_id_capacity;
 static uint32_t next_id=1;
 static size_t created, deleted, acquired, signaled, timed_out;
-static Sema *find(uint32_t id) {
-    for (Sema *s=registry;s;s=s->next) if (s->id==id) return s;
-    return NULL;
-}
+static Sema *find(uint32_t id) { return id<by_id_capacity ? by_id[id] : NULL; }
 static void host_check(int e) {
     if (e) { fprintf(stderr,"STOP: semaphore host error %d\n",e); exit(21); }
 }
@@ -55,9 +53,16 @@ static ABI int32_t sem_create(uint32_t *out,const char *name,uint32_t attr,
     if (!s) return ERR(12);
     pthread_mutex_lock(&lock);
     if (next_id==UINT32_MAX) { pthread_mutex_unlock(&lock); free(s); return ERR(28); }
+    if (next_id>=by_id_capacity) {
+        size_t capacity=by_id_capacity ? by_id_capacity*2 : 256;
+        Sema **grown=realloc(by_id,capacity*sizeof(*grown));
+        if (!grown) { pthread_mutex_unlock(&lock); free(s); return ERR(12); }
+        memset(grown+by_id_capacity,0,(capacity-by_id_capacity)*sizeof(*grown));
+        by_id=grown; by_id_capacity=capacity;
+    }
     snprintf(s->name,sizeof(s->name),"%s",name);
     s->id=next_id++; s->attr=attr; s->count=s->initial=initial; s->maximum=maximum;
-    s->next=registry; registry=s; *out=s->id; ++created;
+    by_id[s->id]=s; *out=s->id; ++created;
     printf("Runtime: semaphore id=%u, attr=%u, initial=%d, max=%d\n",s->id,attr,initial,maximum);
     if (runtime_verbose()) printf("Verbose: semaphore id=%u name \"%s\" created (%zu so far)\n",s->id,s->name,created);
     pthread_mutex_unlock(&lock);
@@ -163,10 +168,9 @@ static ABI int32_t sem_cancel(uint32_t id,int32_t count,int32_t *waiters) {
 }
 static ABI int32_t sem_delete(uint32_t id) {
     pthread_mutex_lock(&lock);
-    Sema **p=&registry;
-    while (*p && (*p)->id!=id) p=&(*p)->next;
-    if (!*p) { pthread_mutex_unlock(&lock); return ERR(3); }
-    Sema *s=*p; *p=s->next; s->deleted=1; ++deleted;
+    Sema *s=find(id);
+    if (!s) { pthread_mutex_unlock(&lock); return ERR(3); }
+    by_id[id]=NULL; s->deleted=1; ++deleted;
     if (runtime_verbose()) printf("Verbose: semaphore id=%u (%s) deleted, %zu deleted so far\n",id,s->name,deleted);
     wake_all(s,ERR(13));
     if (!s->active) free(s);
