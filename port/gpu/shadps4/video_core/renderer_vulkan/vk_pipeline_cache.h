@@ -65,6 +65,8 @@ struct Program {
         Shader::RuntimeInfo runtime_info{};
         Shader::Backend::Bindings start{};
         boost::container::small_vector<std::array<u32, 4>, 16> vs_sharps;
+        /// The fetch shader's code: the game can replace it at the same address.
+        boost::container::small_vector<u32, 32> fetch_code;
     } last_match;
     /// tlg: `info` as translated, for draw-preparation workers (they must not read `info`,
     /// whose user data the GPU thread rewrites every draw). Guarded by programs_mutex.

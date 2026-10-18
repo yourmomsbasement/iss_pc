@@ -2006,9 +2006,28 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         }
         return true;
     };
+    // The flattened user data holds the fetch shader's address, not its code, which decides the
+    // attributes (a fresh specialization parses it on every draw).
+    const auto fetch_code_match = [&](bool store) {
+        const auto& fetch = program->modules[last.perm_idx].spec.fetch_shader_data;
+        if (!fetch || !info.has_fetch_shader) {
+            if (store) {
+                last.fetch_code.clear();
+            }
+            return store || last.fetch_code.empty();
+        }
+        const u32* code = Shader::Gcn::GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
+        const size_t words = fetch->size / sizeof(u32);
+        if (store) {
+            last.fetch_code.assign(code, code + words);
+            return true;
+        }
+        return last.fetch_code.size() == words &&
+               std::memcmp(code, last.fetch_code.data(), words * sizeof(u32)) == 0;
+    };
     if (reusable && last.perm_idx < program->modules.size() && last.start == binding &&
         last.runtime_info == runtime_info && last.flat_buf == info.flattened_ud_buf &&
-        vs_sharps_match(false)) {
+        vs_sharps_match(false) && fetch_code_match(false)) {
         auto& hit = program->modules[last.perm_idx];
         if (reuse_mode == 2) {
             // The lookup below compares stored == fresh (the operator is not symmetric).
@@ -2093,6 +2112,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         last.runtime_info = runtime_info;
         last.start = start_binding;
         vs_sharps_match(true);
+        fetch_code_match(true);
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
