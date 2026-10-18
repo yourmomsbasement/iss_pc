@@ -1189,7 +1189,11 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
             used_prepared = prepared;
-            TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(prepared->key), true);
+            // tlg: hashing the 344-byte key is pure overhead unless the trace is on; the
+            // prepared path serves 97-98% of draws, so this runs for almost every draw.
+            if (TlgRegion::Enabled()) {
+                TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(prepared->key), true);
+            }
             return pipeline;
         }
     }
@@ -1203,9 +1207,13 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
         return nullptr;
     }
-    // tlg: region trace (TLG_REGION_TRACE=1): the first request of each pipeline.
-    TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(sel.graphics_key),
-                            graphics_pipelines.contains(sel.graphics_key));
+    // tlg: region trace (TLG_REGION_TRACE=1): the first request of each pipeline. Computing the
+    // key hash and probing the map only make sense when the trace is actually recording; this is
+    // per draw on the GPU command thread (the documented bottleneck).
+    if (TlgRegion::Enabled()) {
+        TlgRegion::NotePipeline('g', std::hash<GraphicsPipelineKey>{}(sel.graphics_key),
+                                graphics_pipelines.contains(sel.graphics_key));
+    }
     if (Precompile::CaptureEnabled() && !graphics_pipelines.contains(sel.graphics_key)) {
         Precompile::CaptureGraphics(sel);
     }
@@ -1321,8 +1329,10 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     if (!RefreshComputeKey()) {
         return nullptr;
     }
-    TlgRegion::NotePipeline('c', std::hash<ComputePipelineKey>{}(compute_key),
-                            compute_pipelines.contains(compute_key));
+    if (TlgRegion::Enabled()) {
+        TlgRegion::NotePipeline('c', std::hash<ComputePipelineKey>{}(compute_key),
+                                compute_pipelines.contains(compute_key));
+    }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new && Precompile::CaptureEnabled()) {
         Precompile::CaptureCompute(sel, liverpool->GetCsRegs());
