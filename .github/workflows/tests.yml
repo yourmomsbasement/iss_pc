@@ -1,0 +1,38 @@
+# Fast merge gate: the unit tests that build without the full GPU library, game files or a GPU
+# (.github/scripts/unit_tests.sh). The full Linux/Windows packages are built by build.yml.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Submodules (headers only)
+        run: git submodule update --init --depth 1 port/gpu/third_party/vulkan-headers port/gpu/third_party/magic_enum
+      - name: System packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends gcc-14 g++-14 python3 \
+            libboost-dev libfmt-dev libvulkan-dev mesa-vulkan-drivers
+      - name: Unit tests
+        run: bash .github/scripts/unit_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: unit-test-logs
+          path: port/out/unit-tests/*.log
+          retention-days: 7
