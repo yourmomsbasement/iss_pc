@@ -20,6 +20,16 @@ static uint64_t capabilities;
 static _Atomic size_t guards_acquired, guards_released;
 static uint64_t stack_canary;
 static _Atomic size_t memory_calls;
+/* Counted per thread and added to memory_calls every 4096 calls: one shared counter written by
+ * every guest memcpy/memset on every core moved its cache line between them (~85 ns per call
+ * with 4 threads instead of ~2). The report misses each thread's last <4096 calls. */
+static _Thread_local size_t memory_calls_local;
+static inline void count_memory_call(void) {
+    if (++memory_calls_local == 4096) {
+        atomic_fetch_add_explicit(&memory_calls, 4096, memory_order_relaxed);
+        memory_calls_local = 0;
+    }
+}
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
 #define TLS_MODULES 8
 static struct { const void *data; uint64_t filesz, memsz; } tls_modules[TLS_MODULES];
@@ -84,7 +94,7 @@ void runtime_report(void) {
     runtime_pad_report();
     runtime_savedata_report();
     runtime_file_report();
-    printf("Runtime: memory operations=%zu\n", (size_t)memory_calls);
+    printf("Runtime: memory operations=%zu\n", (size_t)memory_calls + memory_calls_local);
     if (report_hook) report_hook();
 }
 void runtime_set_report_hook(void (*hook)(void)) { report_hook = hook; }
@@ -167,20 +177,20 @@ static ABI __attribute__((noreturn)) void stack_fail(void) {
 /* Writes of 64 bytes or more into GPU-modified memory go through tlggpu_cpu_write (no fault and no
  * GPU wait with TLG_WRITE_MERGE=1); smaller ones and other memory write normally. */
 static ABI void *guest_memset(void *dst, int value, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    count_memory_call();
     if (size >= 64 && tlggpu_cpu_write(dst, NULL, value, size)) return dst;
     return memset(dst, value, size);
 }
 static ABI void *guest_memcpy(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed);
+    count_memory_call();
     if (size >= 64 && tlggpu_cpu_write(dst, src, -1, size)) return dst;
     return memcpy(dst, src, size);
 }
 static ABI void *guest_memmove(void *dst, const void *src, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memmove(dst, src, size);
+    count_memory_call(); return memmove(dst, src, size);
 }
 static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
-    atomic_fetch_add_explicit(&memory_calls,1,memory_order_relaxed); return memcmp(a, b, size);
+    count_memory_call(); return memcmp(a, b, size);
 }
 static ABI size_t guest_strlen(const char *text) { return strlen(text); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
