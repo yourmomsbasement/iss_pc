@@ -123,6 +123,10 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_rwlock_rp.c -o out/rwlock-rp-test
     out/rwlock-rp-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -UNDEBUG -pthread -I. -Isrc tests/test_backing_cache.c -o out/backing-cache-test
+    out/backing-cache-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -UNDEBUG -I. -Isrc tests/test_particle_heap_hook.c -o out/particle-heap-hook-test
+    out/particle-heap-hook-test out/eboot.elf
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_freeze.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/freeze-test
     out/freeze-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test

@@ -302,10 +302,45 @@ void BufferCache::ReleaseReadProtection(VAddr device_addr, u64 size) {
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
 }
 
+bool BufferCache::DiscardDeadGpuData(VAddr device_addr, u64 size) {
+    // A copy back in flight would put its ranges back (RecoverDeferredReadback): keep the
+    // ordinary path for this range then.
+    if (deferred_count.load(std::memory_order_acquire)) {
+        std::scoped_lock lock{deferred_mutex};
+        for (const auto& readback : deferred_readbacks) {
+            if (!readback->Done() && readback->start < device_addr + size && device_addr < readback->end) {
+                return false;
+            }
+        }
+    }
+    MarkEagerStale(device_addr, size); // the copies must not land over what the game writes next
+    {
+        std::scoped_lock lock{dead_mutex};
+        dead_discards.emplace_back(device_addr, size);
+        has_dead_discards.store(true, std::memory_order_release);
+    }
+    // Lifts the read protection: the game's writes to these pages no longer wait for the GPU.
+    memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+    return true;
+}
+
+void BufferCache::ApplyDeadDiscards() {
+    if (!has_dead_discards.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::scoped_lock lock{dead_mutex};
+    for (const auto& [address, size] : dead_discards) {
+        gpu_modified_ranges.Subtract(address, size);
+    }
+    dead_discards.clear();
+    has_dead_discards.store(false, std::memory_order_relaxed);
+}
+
 u64 BufferCache::CollectDownloads(const Buffer* arena, VAddr device_addr, u64 size,
                                   boost::container::small_vector<vk::BufferCopy, 8>& copies) {
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
+    ApplyDeadDiscards();
     memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
         const auto add_download = [&](VAddr start, VAddr end) {
             const u64 new_offset = start - arena_base;
@@ -497,6 +532,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             TlgStats::buffer_upload_bytes.load(std::memory_order_relaxed) - uploaded_before;
     }
     if (is_written) {
+        ApplyDeadDiscards(); // a discard queued earlier must not remove this newer write
         gpu_modified_ranges.Add(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};

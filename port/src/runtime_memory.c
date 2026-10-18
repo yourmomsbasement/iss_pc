@@ -91,6 +91,10 @@ static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
 static uint64_t table_generation;
+/* Lock-free writes through the backing view in flight (runtime_memory_write_backing). A writer
+ * makes the generation odd, then waits for them: each either saw the odd generation and backs
+ * off, or finishes its copy before the table changes (both sides are sequentially consistent). */
+static unsigned backing_writers;
 /* Contended acquisitions are marked for the freeze report (the uncontended path only adds a try). */
 static void write_lock(void) {
     if (!exclusive_depth++) {
@@ -99,7 +103,8 @@ static void write_lock(void) {
             table_wrlock();
             runtime_wait_end();
         }
-        __atomic_add_fetch(&table_generation,1,__ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&table_generation,1,__ATOMIC_SEQ_CST);
+        while (__atomic_load_n(&backing_writers,__ATOMIC_SEQ_CST)) __builtin_ia32_pause();
     }
 }
 static void write_unlock(void) {
@@ -788,9 +793,51 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
     write_unlock();
     flush_hooks();
 }
+/* Per-thread cache of recently found regions for the GPU's per-draw queries and backing copies:
+ * entries hold for as long as the table generation they were read at. */
+typedef struct { uint64_t generation; uintptr_t start, end; int kind; uint64_t phys; } CachedRegion;
+static __thread CachedRegion region_cache[8];
+static __thread unsigned region_cache_next;
+static const CachedRegion *cached_region(uintptr_t address) {
+    uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
+    if (generation & 1) return NULL;
+    for (unsigned i=0;i<8;++i) {
+        const CachedRegion *c=&region_cache[i];
+        if (c->generation==generation && c->end && c->start<=address && address<c->end) return c;
+    }
+    return NULL;
+}
+/* Called under the read lock after a lookup of address. */
+static void cache_region(size_t i) {
+    uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
+    if (i==vma_count || (generation & 1)) return;
+    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind,vmas[i].phys};
+}
+/* Backing view of [address,address+size) from this thread's region cache, or NULL. Lock free:
+ * the backing view stays mapped for the whole run, so a stale entry cannot fault; callers check
+ * *generation again after the copy. */
+static unsigned char *cached_backing(uintptr_t address, uint64_t size, uint64_t *generation) {
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    if (!c || c->kind==KIND_RESERVED || size>c->end-address) return NULL;
+    *generation=c->generation;
+    return backing_base+c->phys+(address-c->start);
+}
 /* Writes through the backing view; 0 when part of the range has no backing. */
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
+    uint64_t generation;
+    unsigned char *to=cached_backing(address,size,&generation);
+    if (to) {
+        /* A map change must not land between the check and the copy (the physical range could
+         * already belong to another mapping), so write_lock waits for this copy; data is a host
+         * buffer, never guest memory that could fault into the table lock. */
+        __atomic_add_fetch(&backing_writers,1,__ATOMIC_SEQ_CST);
+        int valid=__atomic_load_n(&table_generation,__ATOMIC_SEQ_CST)==generation;
+        if (valid) memcpy(to,data,size);
+        __atomic_sub_fetch(&backing_writers,1,__ATOMIC_RELEASE);
+        if (valid) return 1;
+    }
     read_lock();
+    { size_t i=vma_index(address); if (i<vma_count && vmas[i].start<=address) cache_region(i); }
     int ok=1;
     for (uintptr_t at=address, end=address+size; at<end && ok;) {
         size_t i=vma_index(at);
@@ -807,7 +854,16 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
  * read of a page protected for readback (TLG_READBACKS=2) cannot fault into a readback that waits
  * for the same thread (the Vulkan recorder). */
 int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
+    uint64_t generation;
+    const unsigned char *from=cached_backing(address,size,&generation);
+    if (from) {
+        /* Seqlock read: a copy that overlapped a map change is redone under the lock. */
+        memcpy(data,from,size);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&table_generation,__ATOMIC_RELAXED)==generation) return 1;
+    }
     read_lock();
+    { size_t i=vma_index(address); if (i<vma_count && vmas[i].start<=address) cache_region(i); }
     int ok=1;
     for (uintptr_t at=address, end=address+size; at<end && ok;) {
         size_t i=vma_index(at);
@@ -818,26 +874,6 @@ int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) {
     }
     read_unlock();
     return ok;
-}
-/* Per-thread cache of recently found regions for the GPU's per-draw queries:
- * entries hold for as long as the table generation they were read at. */
-typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;
-static __thread CachedRegion region_cache[8];
-static __thread unsigned region_cache_next;
-static const CachedRegion *cached_region(uintptr_t address) {
-    uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
-    if (generation & 1) return NULL;
-    for (unsigned i=0;i<8;++i) {
-        const CachedRegion *c=&region_cache[i];
-        if (c->generation==generation && c->end && c->start<=address && address<c->end) return c;
-    }
-    return NULL;
-}
-/* Called under the read lock after a lookup of address. */
-static void cache_region(size_t i) {
-    uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
-    if (i==vma_count || (generation & 1)) return;
-    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind};
 }
 /* Mapped length from address, up to size, across adjacent mappings. */
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {

@@ -8,6 +8,9 @@
 #include <chrono>
 #include <algorithm>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
 #include <boost/container/small_vector.hpp>
 #include "tlg_toggles.h"
 #include "common/assert.h"
@@ -77,7 +80,7 @@ struct PageManager::Impl {
     // tracked pages cost the most time (which game code waits on the GPU, and for what).
     struct FaultSite { u64 count = 0, ns = 0; VAddr last = 0; u64 caller = 0; bool write = false; };
     static bool FaultProfileEnabled() {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN64)
         static const bool enabled = [] { const char* e = std::getenv("TLG_FAULT_PROFILE"); return e && *e == '1'; }();
         return enabled;
 #else
@@ -86,14 +89,27 @@ struct PageManager::Impl {
     }
 
     static void ProfileFault(void* context, VAddr addr, bool write, u64 ns) {
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN64)
         static std::mutex mutex;
         static std::unordered_map<u64, FaultSite> sites;
         static auto window = std::chrono::steady_clock::now();
+#ifdef _WIN64
+        const auto* registers = static_cast<const EXCEPTION_POINTERS*>(context)->ContextRecord;
+        const u64 rip = registers->Rip;
+        // A stack word is only a caller candidate, especially outside leaf functions.
+        // ReadProcessMemory safely handles an inaccessible stack without another fault.
+        u64 caller = 0;
+        SIZE_T bytes_read = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(registers->Rsp),
+                               &caller, sizeof(caller), &bytes_read) || bytes_read != sizeof(caller)) {
+            caller = 0;
+        }
+#else
         const auto* uc = static_cast<ucontext_t*>(context);
         const u64 rip = static_cast<u64>(uc->uc_mcontext.gregs[REG_RIP]);
         // The return address at the top of the stack (right for leaf routines such as memcpy).
         const u64 caller = *reinterpret_cast<const u64*>(uc->uc_mcontext.gregs[REG_RSP]);
+#endif
         std::scoped_lock lock{mutex};
         auto& site = sites[rip];
         ++site.count;

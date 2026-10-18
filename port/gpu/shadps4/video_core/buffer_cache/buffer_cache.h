@@ -104,6 +104,10 @@ public:
     /// tlg: a CPU read fault on pages with no GPU-modified data: lift the read protection on the
     /// faulting thread instead of a round trip through the GPU command thread.
     void ReleaseReadProtection(VAddr device_addr, u64 size);
+    /// tlg: any thread. The game reuses memory whose GPU-written data it no longer needs (the
+    /// particle heap's halves, src/particle_heap_hook.h): forget that the GPU modified it instead
+    /// of downloading it on the next CPU write. False when a copy back is in flight over it.
+    bool DiscardDeadGpuData(VAddr device_addr, u64 size);
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
@@ -209,6 +213,12 @@ private:
     u64 eager_next_offset = 0;
     std::atomic<u32> eager_count{0};
     std::vector<VAddr> eager_subtracts; ///< pages served on guest threads: leave gpu_modified_ranges
+    /// tlg: ranges DiscardDeadGpuData took out on guest threads; they leave gpu_modified_ranges on
+    /// the GPU-side threads before it is read or added to.
+    void ApplyDeadDiscards();
+    std::mutex dead_mutex;
+    std::vector<std::pair<VAddr, u64>> dead_discards;
+    std::atomic<bool> has_dead_discards{false};
     std::unique_ptr<Buffer> eager_buffer;
 
     /// tlg: TLG_DEFERRED_READBACK=1 (precise readbacks): the reads the eager copies don't cover.

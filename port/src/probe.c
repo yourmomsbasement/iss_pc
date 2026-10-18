@@ -14,6 +14,7 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "view_hook.h"
+#include "particle_heap_hook.h"
 #include "gpu/tlggpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -538,6 +539,7 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
 }
 extern ABI float tlg_orbs_gain(void *player, float requested);
 extern void tlg_orbs_status(int supported);
+extern ABI void tlg_particle_heap_begin(void *allocator, uint64_t base, int32_t size);
 extern uintptr_t tlg_cheat_flag(unsigned id);
 extern uintptr_t tlg_actor_slots_address(void);
 extern void tlg_actor_status(int supported);
@@ -662,6 +664,42 @@ static void install_orb_multiplier(const char *app0, Segment *segments, uint64_t
     tlg_orbs_status(1);
     printf("Red orbs: live multiplier ready (3 validated gain paths, 0.1x to 100x)\n");
 }
+/* Particle heap reuse (src/particle_heap_hook.h): the frame's half of the particle pool holds only
+ * dead GPU data from two frames ago, so the host forgets it instead of downloading it on the
+ * game's first write to each page. TLG_PARTICLE_HEAP_DISCARD=0 leaves the game unpatched. */
+static void install_particle_heap_discard(Segment *segments, uint64_t count) {
+    const char *env = getenv("TLG_PARTICLE_HEAP_DISCARD");
+    if (env && *env == '0') {
+        printf("Particle heap: dead-data discard off (TLG_PARTICLE_HEAP_DISCARD=0)\n");
+        return;
+    }
+    for (uint64_t i = 0; i < count; ++i) {
+        TlgParticleSites sites;
+        if (!(segments[i].flags & 1) ||
+            !tlg_particle_find_sites(image + segments[i].address, segments[i].size, &sites)) continue;
+        const uint64_t base = segments[i].address;
+        unsigned char *stub = allocate(page_size);
+        int32_t relative[2];
+        const uint64_t rel[2] = {base + sites.call_rel, base + sites.jump_rel};
+        for (unsigned k = 0; k < 2; ++k) {
+            const int64_t delta = (int64_t)(uintptr_t)stub - (int64_t)(uintptr_t)(image + rel[k] + 4);
+            if (delta < INT32_MIN || delta > INT32_MAX) {
+                printf("Particle heap: dead-data discard unavailable (stub out of range)\n");
+                return;
+            }
+            relative[k] = (int32_t)delta;
+        }
+        unsigned char code[TLG_PARTICLE_STUB_BYTES];
+        tlg_particle_build_stub(code, (uintptr_t)tlg_particle_heap_begin, (uintptr_t)(image + base + sites.begin));
+        memcpy(stub, code, sizeof(code));
+        protect(stub, page_size, 5);
+        for (unsigned k = 0; k < 2; ++k) memcpy(image + rel[k], &relative[k], 4);
+        printf("Particle heap: dead-data discard ready (Begin at 0x%" PRIx64 ", 2 call sites)\n", base + sites.begin);
+        return;
+    }
+    printf("Particle heap: dead-data discard unavailable (code signature not found)\n");
+}
+
 /* Writes a jump from image+at to `stub`; the rest of the replaced bytes become nops (the stub
  * replays them). 0 when the stub is out of relative-jump range. */
 static int install_jump(uint64_t at, unsigned length, unsigned char *stub) {
@@ -1284,6 +1322,7 @@ int main(int argc, char **argv) {
     if (gpu_enabled) install_actor_watch(app0, segments, ns, size);
     if (gpu_enabled) install_stat_multipliers(app0, segments, ns, size);
     if (gpu_enabled) install_view_tuning(segments, ns, size);
+    if (gpu_enabled) install_particle_heap_discard(segments, ns);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
