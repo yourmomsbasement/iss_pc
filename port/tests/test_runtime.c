@@ -325,6 +325,53 @@ static void rw_timeouts(void) {
     assert(rw_unlock(&f.lock)==0);
     fixture_destroy(&f);
 }
+/* More rwlocks held at once than a thread's inline list keeps. */
+static void rw_many_held(void) {
+    rw_setup();
+    void *l[40]={0};
+    for (int i=0;i<40;++i) assert(rw_read(&l[i])==0);
+    for (int i=0;i<40;++i) assert((uint32_t)rw_destroy(&l[i])==0x80020010);
+    for (int i=39;i>=0;--i) assert(rw_unlock(&l[i])==0);
+    for (int i=0;i<40;++i) assert(rw_destroy(&l[i])==0);
+}
+/* Threads mix nested reads, writes and try-writes on shared rwlocks, checking exclusion, while
+ * creating and destroying private ones (statically initialized or not). */
+static void *shared_locks[4];
+static _Atomic int inside[4];
+static void *stress_worker(void *context) {
+    unsigned seed=(unsigned)(uintptr_t)context;
+    MutexInit init=GET(MutexInit,"6ULAa0fq4jA#libkernel");
+    for (int i=0;i<20000;++i) {
+        seed=seed*1103515245u+12345u;
+        int k=(int)(seed>>16)%4, op=(int)(seed>>20)%4;
+        void **l=&shared_locks[k];
+        if (op==0) {
+            assert(rw_write(l)==0 && atomic_fetch_add(&inside[k],1000)==0);
+            atomic_fetch_sub(&inside[k],1000); assert(rw_unlock(l)==0);
+        } else if (op==1) {
+            assert(rw_read(l)==0 && atomic_fetch_add(&inside[k],1)<1000 && rw_read(l)==0);
+            atomic_fetch_sub(&inside[k],1); assert(rw_unlock(l)==0 && rw_unlock(l)==0);
+        } else if (op==2) {
+            int32_t e=rw_trywrite(l);
+            if (e) { assert((uint32_t)e==0x80020010); continue; }
+            assert(atomic_fetch_add(&inside[k],1000)==0);
+            atomic_fetch_sub(&inside[k],1000); assert(rw_unlock(l)==0);
+        } else {
+            void *own=NULL;
+            if (seed & 1) assert(init(&own,NULL,"stress")==0);
+            assert(rw_write(&own)==0 && (uint32_t)rw_destroy(&own)==0x80020010);
+            assert(rw_unlock(&own)==0 && rw_destroy(&own)==0);
+        }
+    }
+    return NULL;
+}
+static void rw_stress(void) {
+    rw_setup();
+    pthread_t threads[8];
+    for (uintptr_t i=0;i<8;++i) assert(pthread_create(&threads[i],NULL,stress_worker,(void *)(i+1))==0);
+    for (int i=0;i<8;++i) assert(pthread_join(threads[i],NULL)==0);
+    for (int k=0;k<4;++k) assert(rw_destroy(&shared_locks[k])==0);
+}
 int main(int argc,char **argv) {
     runtime_start(0); assert(runtime_resolve("bzQExy189ZI#libc",0)==0);
     runtime_start(1);
@@ -355,8 +402,9 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
+    if (argc>1 && !strcmp(argv[1],"--rwlock-stress")) { rw_many_held(); rw_stress(); return 0; }
     libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
-    rw_lifecycle(); rw_concurrency(); rw_timeouts();
+    rw_lifecycle(); rw_concurrency(); rw_timeouts(); rw_many_held(); rw_stress();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;
 }
