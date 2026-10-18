@@ -156,11 +156,18 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
     TlgStats::Timer timer{TlgStats::t_protect};
     const u64 pages = (size + 4095) / 4096;
-    TlgStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
-    TlgStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
-    if (!True(perms & MemoryPermission::Write)) {
-        TlgStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
-        TlgStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
+    // tlg: these counters are read only under TLG_FRAME_STATS (which also sets
+    // TlgStats::enabled). Protect runs on the hot tracking path from every render
+    // thread, and a shared-atomic RMW per call bounces the counter cache lines
+    // across cores; gate them like the Timer above so the default build pays
+    // nothing. (Contended, 4-8 threads: ~90-100 ns/call -> ~5 ns.)
+    if (TlgStats::enabled) {
+        TlgStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
+        TlgStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
+        if (!True(perms & MemoryPermission::Write)) {
+            TlgStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
+            TlgStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
+        }
     }
     runtime_memory_gpu_protect(virtual_addr, size, True(perms & MemoryPermission::Read),
                                True(perms & MemoryPermission::Write));

@@ -253,11 +253,18 @@ private:
 
     void CountWriteFaults(size_t start_page, size_t end_page) {
         const bool hot_enabled = HotPagesEnabled();
+        // tlg: tracker_faults is read only under TLG_FRAME_STATS (== TlgStats::enabled).
+        // With hot pages off and stats off (the default) the loop only fed a shared-atomic
+        // counter nobody reads, once per protected page under the region lock; skip it.
+        if (!hot_enabled && !TlgStats::enabled) {
+            return;
+        }
+        u64 faults = 0;
         for (size_t page = start_page; page < end_page; ++page) {
             if (writeable.Get(page)) {
                 continue; // not protected: no fault
             }
-            TlgStats::tracker_faults.fetch_add(1, std::memory_order_relaxed);
+            ++faults; // batched into one atomic below instead of one RMW per page
             if (!hot_enabled) {
                 continue;
             }
@@ -273,6 +280,9 @@ private:
                 ++num_hot;
                 TlgStats::hot_pages.fetch_add(1, std::memory_order_relaxed);
             }
+        }
+        if (faults != 0) {
+            TlgStats::tracker_faults.fetch_add(faults, std::memory_order_relaxed);
         }
     }
 
