@@ -143,14 +143,18 @@ struct PageManager::Impl {
     static bool HandleGuestFault(void* context, VAddr addr) {
         // tlg: the draw recording thread handles its faults inline too (vk_draw_pipe.h).
         const auto is_gpu_thread = rasterizer->IsGpuSideThread();
-        if (is_gpu_thread) {
+        // tlg: diagnostic counters read only under TLG_FRAME_STATS (== TlgStats::enabled);
+        // gate them like the Timers so the default fault path takes no shared-atomic RMW.
+        if (is_gpu_thread && TlgStats::enabled) {
             TlgStats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
         }
         if (Common::IsWriteError(context)) {
             TlgStats::Timer timer{TlgStats::t_write_faults};
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
-            TlgStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+            if (TlgStats::enabled) {
+                TlgStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+            }
             TlgStats::Timer timer{TlgStats::t_read_faults};
             return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
